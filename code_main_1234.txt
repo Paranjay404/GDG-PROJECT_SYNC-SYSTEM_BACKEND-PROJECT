@@ -1,0 +1,543 @@
+from fastapi import FastAPI, HTTPException
+import psycopg2
+from pydantic import BaseModel
+import json
+
+app = FastAPI()
+
+DB_CONFIG = {
+    "host": "localhost",
+    "database": "sync_system",
+    "user": "postgres",
+    "password": "1234"
+}
+
+
+def get_connection():
+    return psycopg2.connect(**DB_CONFIG)
+
+
+class User(BaseModel):
+    name: str
+    email: str
+    password: str
+    phone: str
+
+
+class Device(BaseModel):
+    user_id: int
+    device_name: str
+
+
+class Document(BaseModel):
+    user_id: int
+    title: str
+    content: str
+
+
+class UpdateRequest(BaseModel):
+    device_id: int
+    base_version: int
+    changes: dict
+
+
+class SyncRequest(BaseModel):
+    device_id: int
+    document_id: int
+    base_version: int
+    changes: dict
+
+
+class ConflictResolution(BaseModel):
+    resolution: str
+    value: str
+
+
+@app.post("/users")
+def create_user(user: User):
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO users(name, email, password, phone)
+        VALUES (%s, %s, %s, %s)
+        RETURNING user_id
+        """,
+        (user.name, user.email, user.password, user.phone)
+    )
+
+    user_id = cursor.fetchone()[0]
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    return {
+        "user_id": user_id
+    }
+
+
+@app.post("/devices")
+def create_device(device: Device):
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO devices(user_id, device_name)
+        VALUES (%s, %s)
+        RETURNING device_id
+        """,
+        (device.user_id, device.device_name)
+    )
+
+    device_id = cursor.fetchone()[0]
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    return {
+        "device_id": device_id
+    }
+
+
+@app.post("/documents")
+def create_document(document: Document):
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO documents(user_id, title, content, version)
+        VALUES (%s, %s, %s, 1)
+        RETURNING document_id
+        """,
+        (
+            document.user_id,
+            document.title,
+            document.content
+        )
+    )
+
+    document_id = cursor.fetchone()[0]
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    return {
+        "document_id": document_id,
+        "version": 1
+    }
+
+
+@app.get("/documents/{document_id}")
+def get_document(document_id: int):
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT document_id, title, content, version, updated_by_device
+        FROM documents
+        WHERE document_id = %s
+        """,
+        (document_id,)
+    )
+
+    row = cursor.fetchone()
+
+    cursor.close()
+    conn.close()
+
+    if row is None:
+        raise HTTPException(404, "Document not found")
+
+    return {
+        "document_id": row[0],
+        "title": row[1],
+        "content": row[2],
+        "version": row[3],
+        "updated_by_device": row[4]
+    }
+
+
+@app.put("/documents/{document_id}")
+def update_document(
+    document_id: int,
+    request: UpdateRequest
+):
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT title, content, version
+        FROM documents
+        WHERE document_id = %s
+        """,
+        (document_id,)
+    )
+
+    row = cursor.fetchone()
+
+    if row is None:
+        cursor.close()
+        conn.close()
+        raise HTTPException(404, "Document not found")
+
+    title, content, version = row
+
+    if request.base_version != version:
+        cursor.close()
+        conn.close()
+
+        return {
+            "status": "OUTDATED",
+            "server_version": version
+        }
+
+    if "title" in request.changes:
+        title = request.changes["title"]
+
+    if "content" in request.changes:
+        content = request.changes["content"]
+
+    new_version = version + 1
+
+    cursor.execute(
+        """
+        UPDATE documents
+        SET title = %s,
+            content = %s,
+            version = %s,
+            updated_by_device = %s,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE document_id = %s
+        """,
+        (
+            title,
+            content,
+            new_version,
+            request.device_id,
+            document_id
+        )
+    )
+
+    cursor.execute(
+        """
+        INSERT INTO change_log
+        (
+            document_id,
+            device_id,
+            base_version,
+            new_version,
+            changed_fields
+        )
+        VALUES (%s, %s, %s, %s, %s)
+        """,
+        (
+            document_id,
+            request.device_id,
+            version,
+            new_version,
+            json.dumps(request.changes)
+        )
+    )
+
+    conn.commit()
+
+    cursor.close()
+    conn.close()
+
+    return {
+        "status": "ACCEPTED",
+        "document_id": document_id,
+        "version": new_version
+    }
+
+
+@app.post("/sync")
+def sync(request: SyncRequest):
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT title, content, version
+        FROM documents
+        WHERE document_id = %s
+        """,
+        (request.document_id,)
+    )
+
+    row = cursor.fetchone()
+
+    if row is None:
+        cursor.close()
+        conn.close()
+        raise HTTPException(404, "Document not found")
+
+    title, content, server_version = row
+
+    if request.base_version == server_version:
+
+        if "title" in request.changes:
+            title = request.changes["title"]
+
+        if "content" in request.changes:
+            content = request.changes["content"]
+
+        new_version = server_version + 1
+
+        cursor.execute(
+            """
+            UPDATE documents
+            SET title = %s,
+                content = %s,
+                version = %s,
+                updated_by_device = %s,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE document_id = %s
+            """,
+            (
+                title,
+                content,
+                new_version,
+                request.device_id,
+                request.document_id
+            )
+        )
+
+        cursor.execute(
+            """
+            INSERT INTO change_log
+            (
+                document_id,
+                device_id,
+                base_version,
+                new_version,
+                changed_fields
+            )
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (
+                request.document_id,
+                request.device_id,
+                server_version,
+                new_version,
+                json.dumps(request.changes)
+            )
+        )
+
+        conn.commit()
+
+        cursor.close()
+        conn.close()
+
+        return {
+            "status": "ACCEPTED",
+            "document_id": request.document_id,
+            "version": new_version
+        }
+
+    cursor.execute(
+        """
+        SELECT changed_fields
+        FROM change_log
+        WHERE document_id = %s
+        AND new_version > %s
+        ORDER BY new_version
+        """,
+        (
+            request.document_id,
+            request.base_version
+        )
+    )
+
+    server_changes = cursor.fetchall()
+
+    changed_by_server = set()
+
+    for change in server_changes:
+        fields = change[0]
+
+        if isinstance(fields, str):
+            fields = json.loads(fields)
+
+        changed_by_server.update(fields.keys())
+
+    client_fields = set(request.changes.keys())
+
+    conflicts = client_fields.intersection(changed_by_server)
+
+    if conflicts:
+
+        conflict_data = {}
+
+        for field in conflicts:
+
+            client_value = request.changes[field]
+
+            server_value = title if field == "title" else content
+
+            conflict_data[field] = {
+                "server_value": server_value,
+                "client_value": client_value
+            }
+
+        conn.rollback()
+
+        cursor.close()
+        conn.close()
+
+        return {
+            "status": "CONFLICT",
+            "document_id": request.document_id,
+            "server_version": server_version,
+            "conflicts": conflict_data
+        }
+
+    if "title" in request.changes:
+        title = request.changes["title"]
+
+    if "content" in request.changes:
+        content = request.changes["content"]
+
+    new_version = server_version + 1
+
+    cursor.execute(
+        """
+        UPDATE documents
+        SET title = %s,
+            content = %s,
+            version = %s,
+            updated_by_device = %s,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE document_id = %s
+        """,
+        (
+            title,
+            content,
+            new_version,
+            request.device_id,
+            request.document_id
+        )
+    )
+
+    cursor.execute(
+        """
+        INSERT INTO change_log
+        (
+            document_id,
+            device_id,
+            base_version,
+            new_version,
+            changed_fields
+        )
+        VALUES (%s, %s, %s, %s, %s)
+        """,
+        (
+            request.document_id,
+            request.device_id,
+            request.base_version,
+            new_version,
+            json.dumps(request.changes)
+        )
+    )
+
+    conn.commit()
+
+    cursor.close()
+    conn.close()
+
+    return {
+        "status": "MERGED",
+        "document_id": request.document_id,
+        "version": new_version,
+        "data": {
+            "title": title,
+            "content": content
+        }
+    }
+
+
+@app.get("/documents/{document_id}/changes")
+def get_changes(
+    document_id: int,
+    since_version: int
+):
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT device_id,
+               base_version,
+               new_version,
+               changed_fields
+        FROM change_log
+        WHERE document_id = %s
+        AND new_version > %s
+        ORDER BY new_version
+        """,
+        (document_id, since_version)
+    )
+
+    rows = cursor.fetchall()
+
+    cursor.close()
+    conn.close()
+
+    changes = []
+
+    for row in rows:
+
+        fields = row[3]
+
+        if isinstance(fields, str):
+            fields = json.loads(fields)
+
+        changes.append({
+            "device_id": row[0],
+            "base_version": row[1],
+            "new_version": row[2],
+            "changed_fields": fields
+        })
+
+    return {
+        "document_id": document_id,
+        "changes": changes
+    }
+
+
+@app.get("/documents/{document_id}/conflicts")
+def get_conflicts(document_id: int):
+
+    return {
+        "document_id": document_id,
+        "conflicts": []
+    }
+
+
+@app.post("/conflicts/{conflict_id}/resolve")
+def resolve_conflict(
+    conflict_id: int,
+    request: ConflictResolution
+):
+
+    return {
+        "status": "RESOLVED",
+        "conflict_id": conflict_id,
+        "resolution": request.resolution,
+        "value": request.value
+    }

@@ -1,0 +1,265 @@
+"""
+1. CREATE USER
+
+POST /users
+
+Input:
+{
+    "name": "Rahul",
+    "email": "abc@gmail.com",
+    "password": "123456",
+    "phone": "1111111111"
+}
+
+Output:
+{
+    "user_id": 1
+}
+
+
+2. REGISTER DEVICE
+
+POST /devices
+
+Input:
+{
+    "user_id": 1,
+    "device_name": "Rahul Laptop"
+}
+
+Output:
+{
+    "device_id": 1
+}
+
+Second device:
+
+Input:
+{
+    "user_id": 1,
+    "device_name": "Rahul Phone"
+}
+
+Output:
+{
+    "device_id": 2
+}
+
+
+3. CREATE DOCUMENT
+
+POST /documents
+
+Input:
+{
+    "user_id": 1,
+    "title": "My Notes",
+    "content": "Hello World"
+}
+
+Output:
+{
+    "document_id": 1,
+    "version": 1
+}
+
+
+4. GET DOCUMENT
+
+GET /documents/1
+
+Output:
+{
+    "document_id": 1,
+    "title": "My Notes",
+    "content": "Hello World",
+    "version": 1,
+    "updated_by_device": 1
+}
+
+
+5. NORMAL DOCUMENT UPDATE
+
+PUT /documents/1
+
+Input:
+{
+    "device_id": 1,
+    "base_version": 1,
+    "changes": {
+        "title": "My Important Notes"
+    }
+}
+
+Output:
+{
+    "status": "ACCEPTED",
+    "document_id": 1,
+    "version": 2
+}
+
+
+6. OFFLINE SYNC
+
+POST /sync
+
+Input:
+{
+    "device_id": 2,
+    "document_id": 1,
+    "base_version": 2,
+    "changes": {
+        "content": "Hello India"
+    }
+}
+
+Output:
+{
+    "status": "ACCEPTED",
+    "document_id": 1,
+    "version": 3
+}
+
+
+7. NON-CONFLICTING OFFLINE UPDATE
+
+Suppose:
+
+Server version = 6
+
+Phone changed:
+content → "Phone Content"
+
+Laptop was offline at version 5 and changed:
+title → "Laptop Title"
+
+Input:
+
+POST /sync
+
+{
+    "device_id": 1,
+    "document_id": 1,
+    "base_version": 5,
+    "changes": {
+        "title": "Laptop Title"
+    }
+}
+
+Output:
+
+{
+    "status": "MERGED",
+    "document_id": 1,
+    "version": 7,
+    "data": {
+        "title": "Laptop Title",
+        "content": "Phone Content"
+    }
+}
+
+
+8. CONFLICTING OFFLINE UPDATE
+
+Suppose:
+
+Server version = 6
+
+Phone changed:
+title → "Phone Title"
+
+Laptop was offline at version 5 and changed:
+title → "Laptop Title"
+
+Input:
+
+POST /sync
+
+{
+    "device_id": 1,
+    "document_id": 1,
+    "base_version": 5,
+    "changes": {
+        "title": "Laptop Title"
+    }
+}
+
+Output:
+
+HTTP 409
+
+{
+    "status": "CONFLICT",
+    "document_id": 1,
+    "server_version": 6,
+    "conflicts": {
+        "title": {
+            "server_value": "Phone Title",
+            "client_value": "Laptop Title"
+        }
+    }
+}
+
+
+9. GET CHANGE HISTORY
+
+GET /documents/1/changes?since_version=5
+
+Output:
+
+{
+    "document_id": 1,
+    "changes": [
+        {
+            "device_id": 2,
+            "base_version": 5,
+            "new_version": 6,
+            "changed_fields": {
+                "content": "Phone Content"
+            }
+        }
+    ]
+}
+
+
+10. GET CONFLICTS
+
+GET /documents/1/conflicts
+
+Output:
+
+{
+    "document_id": 1,
+    "conflicts": [
+        {
+            "conflict_id": 10,
+            "field": "title",
+            "server_value": "Phone Title",
+            "client_value": "Laptop Title",
+            "device_id": 1,
+            "status": "OPEN"
+        }
+    ]
+}
+
+
+11. RESOLVE CONFLICT
+
+POST /conflicts/10/resolve
+
+Input:
+
+{
+    "resolution": "client",
+    "value": "Laptop Title"
+}
+
+Output:
+
+{
+    "status": "RESOLVED",
+    "conflict_id": 10,
+    "document_id": 1,
+    "version": 8
+}
+"""
